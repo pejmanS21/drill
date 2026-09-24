@@ -1,5 +1,8 @@
 # drill
 
+[![CI](https://github.com/pejmanS21/drill/actions/workflows/ci.yml/badge.svg)](https://github.com/pejmanS21/drill/actions/workflows/ci.yml)
+[![docs](https://img.shields.io/badge/docs-rustdoc-blue)](https://pejmans21.github.io/drill/)
+
 Fetches Divar listings into an append-only raw JSONL store plus mergeable CSV batches.
 
 ## Why v0.2 exists
@@ -13,7 +16,7 @@ The first run (`divar_data/`, 9,386 rows, Tehran + Karaj) has two defects:
 2. **Failures were unrecoverable.** Permanent failures went to stderr and nowhere else, so
    the ~700 listings lost to rate limits were never written down and cannot be retried.
 
-Both are fixed. `divar_data/` is kept as-is for reference; v0.2 writes to `divar_data_iran/`.
+Both are fixed. v0.2 writes to `divar_data_iran/` (scraped data is not committed).
 
 ## Output layout
 
@@ -25,6 +28,18 @@ Both are fixed. `divar_data/` is kept as-is for reference; v0.2 writes to `divar
 
 Storing the raw payload means a new field never requires a re-scrape — change the flattener
 and re-run `--export-only` offline.
+
+## Install
+
+Prebuilt binaries for Linux, macOS and Windows (x86_64 and arm64) are attached to each
+[release](https://github.com/pejmanS21/drill/releases). Or build from source:
+
+```bash
+cargo install --git https://github.com/pejmanS21/drill
+```
+
+API docs: <https://pejmans21.github.io/drill/> (or `cargo doc --open --document-private-items`).
+Pushing a `v*` tag runs the CI release job, which builds all six targets and publishes the release.
 
 ## Usage
 
