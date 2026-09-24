@@ -3,8 +3,8 @@
 Run from torob-car's backend so its ingest package is importable:
 
     cd ../torob-car/backend
-    PYTHONPATH=. uv run python ../../divar-scraper/scripts/check_ingest.py \
-        ../../divar-scraper/other_sources/*.csv
+    PYTHONPATH=. uv run python ../../drill/scripts/check_ingest.py \
+        ../../drill/other_sources/*.csv
 
 Exits non-zero if any CSV has a value the ingest would abort on, or no usable rows.
 """

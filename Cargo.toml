@@ -1,5 +1,5 @@
 [package]
-name = "divar-scraper"
+name = "drill"
 version = "0.2.0"
 edition = "2021"
 

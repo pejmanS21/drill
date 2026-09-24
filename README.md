@@ -1,4 +1,4 @@
-# divar-scraper
+# drill
 
 Fetches Divar listings into an append-only raw JSONL store plus mergeable CSV batches.
 
@@ -32,18 +32,18 @@ and re-run `--export-only` offline.
 
 ```sh
 # 1. Confirm the filter is applied (one request, no detail fetches)
-divar-scraper --dry-run --category auto --city-ids iran
+drill --dry-run --category auto --city-ids iran
 
 # 2. Full run. Pilots 200 listings, verifies them, then fetches the rest and
 #    sweeps its own failures up to 3 times.
-divar-scraper --count 20000 --category auto --city-ids iran
+drill --count 20000 --category auto --city-ids iran
 
 # 3. Keep working anything still outstanding
-divar-scraper --retry-failures
+drill --retry-failures
 
 # 4. Offline: rebuild CSVs / re-audit an existing raw.jsonl
-divar-scraper --export-only
-divar-scraper --audit-only
+drill --export-only
+drill --audit-only
 ```
 
 Re-running step 2 is safe: tokens already in `raw.jsonl` are skipped.
@@ -55,8 +55,8 @@ Skipping seen tokens makes re-runs safe, but it also means a re-run records **no
 one small dated line per listing to `observations.jsonl`. It never writes to `raw.jsonl`.
 
 ```sh
-divar-scraper --observe                     # every known listing
-divar-scraper --observe --observe-max 20000 # a fixed panel: the first 20k, same ones every day
+drill --observe                     # every known listing
+drill --observe --observe-max 20000 # a fixed panel: the first 20k, same ones every day
 ```
 
 ```json
@@ -161,5 +161,5 @@ Before ingesting, run the rows through torob-car's own `map_row`:
 
 ```sh
 cd ../torob-car/backend
-PYTHONPATH=. uv run python ../../divar-scraper/scripts/check_ingest.py ../../divar-scraper/other_sources/*.csv
+PYTHONPATH=. uv run python ../../drill/scripts/check_ingest.py ../../drill/other_sources/*.csv
 ```

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) divar-scraper/0.2";
+const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) drill/0.2";
 const SEARCH_URL: &str = "https://api.divar.ir/v8/postlist/w/search";
 const POST_URL: &str = "https://api.divar.ir/v8/posts-v2/web";
 
@@ -22,7 +22,7 @@ const OBS_FILE: &str = "observations.jsonl";
 const DEAD_PREFIX: &str = "post removed";
 
 #[derive(Parser, Debug)]
-#[command(name = "divar-scraper", about = "Fetch Divar listings into raw JSONL + batched CSV")]
+#[command(name = "drill", about = "Fetch Divar listings into raw JSONL + batched CSV")]
 struct Args {
     /// Total number of listings (آگهی) to fetch
     #[arg(short, long, default_value_t = 10000)]
