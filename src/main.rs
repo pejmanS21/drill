@@ -1,3 +1,33 @@
+//! # drill
+//!
+//! Fetch Divar car listings into an append-only raw store plus mergeable CSV batches.
+//!
+//! ## Pipeline
+//!
+//! 1. **Search** — page Divar's search feed with the category filter re-injected on
+//!    every page ([`search_body`], [`collect_tokens`]) and audit what came back
+//!    ([`audit_categories`]).
+//! 2. **Pilot** — fetch a small batch first and verify the payloads really are
+//!    vehicles ([`audit_fetched_payloads`]) before spending the full request budget.
+//! 3. **Fetch** — download every listing's full detail JSON under an adaptive,
+//!    shared rate limit ([`Throttle`], [`fetch_all`]). Successes go to `raw.jsonl`,
+//!    permanent failures to `failures.jsonl` for later `--retry-failures`.
+//! 4. **Export** — rebuild `batch_NNNNN.csv` from `raw.jsonl` with one header shared by
+//!    every file ([`flatten`], [`export_csv`]). Runs offline via `--export-only`.
+//! 5. **Observe** — `--observe` revisits known listings and appends dated price /
+//!    removal sightings to `observations.jsonl` ([`observe_all`]).
+//!
+//! ## Output files
+//!
+//! | File | Role |
+//! |---|---|
+//! | `raw.jsonl` | Append-only full detail JSON per listing. Source of truth. |
+//! | `failures.jsonl` | Outstanding permanent failures, rewritten each run. |
+//! | `observations.jsonl` | Append-only dated sightings (live + price, or removed). |
+//! | `batch_NNNNN.csv` | Derived from `raw.jsonl`, identical header in every file. |
+//!
+//! Run `drill --help` for every flag.
+
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use futures::stream::{self, StreamExt};
@@ -22,7 +52,10 @@ const OBS_FILE: &str = "observations.jsonl";
 const DEAD_PREFIX: &str = "post removed";
 
 #[derive(Parser, Debug)]
-#[command(name = "drill", about = "Fetch Divar listings into raw JSONL + batched CSV")]
+#[command(
+    name = "drill",
+    about = "Fetch Divar listings into raw JSONL + batched CSV"
+)]
 struct Args {
     /// Total number of listings (آگهی) to fetch
     #[arg(short, long, default_value_t = 10000)]
@@ -143,7 +176,11 @@ struct Throttle {
 
 impl Throttle {
     fn new(start_ms: u64, max_ms: u64) -> Self {
-        Self { delay_ms: AtomicU64::new(start_ms), max_ms, ok_streak: AtomicU64::new(0) }
+        Self {
+            delay_ms: AtomicU64::new(start_ms),
+            max_ms,
+            ok_streak: AtomicU64::new(0),
+        }
     }
 
     fn current(&self) -> u64 {
@@ -197,16 +234,16 @@ fn backoff_delay(base_ms: u64, attempt: u32) -> Duration {
     Duration::from_millis((exp + jitter).min(120_000))
 }
 
+/// Seconds since the Unix epoch.
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // ------------------------------------------------------------------ search
 
-/// Build a search body that ALWAYS carries the category filter. The previous
-/// version echoed the server's `search_data` back verbatim; the filter fell out
-/// and 88% of the last run was not cars. Re-injecting it every page makes that
-/// impossible.
 /// Divar rejects `city_ids: ["iran"]` with 400, so the whole-country request
 /// addresses cities some other way. Rather than guess, the candidates are tried
 /// once at startup and the first that answers 200 is used for the whole run.
@@ -263,9 +300,24 @@ fn city_candidates(raw: &str) -> Vec<CityMode> {
 /// Since the server validates the value and rejects instantly, the cheapest way
 /// to learn the vocabulary is to ask it.
 const CATEGORY_CANDIDATES: &[&str] = &[
-    "vehicles", "auto", "cars", "car", "light", "heavy", "classic", "motorcycles",
-    "auto-parts", "car-rental", "rent-car", "vans", "trucks", "buses",
-    "light-car", "heavy-car", "automobile", "vehicle",
+    "vehicles",
+    "auto",
+    "cars",
+    "car",
+    "light",
+    "heavy",
+    "classic",
+    "motorcycles",
+    "auto-parts",
+    "car-rental",
+    "rent-car",
+    "vans",
+    "trucks",
+    "buses",
+    "light-car",
+    "heavy-car",
+    "automobile",
+    "vehicle",
 ];
 
 /// Try each candidate against the live API and report which are accepted, with
@@ -290,14 +342,24 @@ async fn probe_categories(client: &Client, city: &CityMode, extra: &str) -> Resu
                     .unwrap_or_default();
                 let mut breakdown: BTreeMap<String, usize> = BTreeMap::new();
                 for (_, slug) in &toks {
-                    *breakdown.entry(if slug.is_empty() { "?".into() } else { slug.clone() }).or_default() += 1;
+                    *breakdown
+                        .entry(if slug.is_empty() {
+                            "?".into()
+                        } else {
+                            slug.clone()
+                        })
+                        .or_default() += 1;
                 }
                 println!("  OK   {cat:14} {:3} listings  {breakdown:?}", toks.len());
                 valid.push(cat.clone());
             }
             Err(e) => {
                 let msg = e.to_string();
-                let reason = if msg.contains("invalid category") { "invalid category" } else { "error" };
+                let reason = if msg.contains("invalid category") {
+                    "invalid category"
+                } else {
+                    "error"
+                };
                 println!("  no   {cat:14} {reason}");
             }
         }
@@ -328,16 +390,26 @@ async fn resolve_city_mode(client: &Client, raw: &str, category: &str) -> Result
         let body = search_body(&mode, category, None);
         match search_page(client, &body, 0, 0).await {
             Ok(resp) => {
-                let n = resp.get("list_widgets").and_then(|v| v.as_array()).map_or(0, |a| a.len());
+                let n = resp
+                    .get("list_widgets")
+                    .and_then(|v| v.as_array())
+                    .map_or(0, |a| a.len());
                 if n == 0 {
-                    errors.push(format!("{}: accepted but returned 0 listings", mode.describe()));
+                    errors.push(format!(
+                        "{}: accepted but returned 0 listings",
+                        mode.describe()
+                    ));
                     continue;
                 }
                 eprintln!("  OK -> {} ({n} listings on page 1)", mode.describe());
                 return Ok(mode);
             }
             Err(e) => {
-                eprintln!("  no  -> {}: {}", mode.describe(), e.to_string().lines().next().unwrap_or(""));
+                eprintln!(
+                    "  no  -> {}: {}",
+                    mode.describe(),
+                    e.to_string().lines().next().unwrap_or("")
+                );
                 errors.push(format!("{}: {e}", mode.describe()));
             }
         }
@@ -350,6 +422,12 @@ async fn resolve_city_mode(client: &Client, raw: &str, category: &str) -> Result
     )
 }
 
+/// Build a search body that ALWAYS carries the category filter. The previous
+/// version echoed the server's `search_data` back verbatim; the filter fell out
+/// and 88% of the last run was not cars. Re-injecting it every page makes that
+/// impossible.
+///
+/// `prev` is the previous page's `(search_data, pagination_data)`; `None` requests page one.
 fn search_body(city: &CityMode, category: &str, prev: Option<(&Value, &Value)>) -> Value {
     let mut search_data = match prev {
         Some((sd, _)) if !sd.is_null() => sd.clone(),
@@ -367,6 +445,8 @@ fn search_body(city: &CityMode, category: &str, prev: Option<(&Value, &Value)>) 
     body
 }
 
+/// Overwrite the category inside a server-echoed `search_data` so pagination can
+/// never drop the filter.
 fn force_category(search_data: &mut Value, category: &str) {
     if !search_data.is_object() {
         *search_data = json!({});
@@ -400,7 +480,13 @@ fn token_and_category(widget: &Value) -> Option<(String, String)> {
     Some((token, cat))
 }
 
-async fn search_page(client: &Client, body: &Value, max_retries: u32, backoff_ms: u64) -> Result<Value> {
+/// POST one search page, retrying transient errors and 429s with [`backoff_delay`].
+async fn search_page(
+    client: &Client,
+    body: &Value,
+    max_retries: u32,
+    backoff_ms: u64,
+) -> Result<Value> {
     let mut attempt = 0u32;
     loop {
         let outcome = async {
@@ -422,7 +508,9 @@ async fn search_page(client: &Client, body: &Value, max_retries: u32, backoff_ms
             if !status.is_success() {
                 bail!("search page http status {status}");
             }
-            resp.json::<Value>().await.context("search response not JSON")
+            resp.json::<Value>()
+                .await
+                .context("search response not JSON")
         }
         .await;
 
@@ -435,7 +523,10 @@ async fn search_page(client: &Client, body: &Value, max_retries: u32, backoff_ms
                     return Err(e);
                 }
                 let wait = backoff_delay(backoff_ms, attempt);
-                eprintln!("search retry {attempt}/{max_retries}: {e:#} (waiting {}ms)", wait.as_millis());
+                eprintln!(
+                    "search retry {attempt}/{max_retries}: {e:#} (waiting {}ms)",
+                    wait.as_millis()
+                );
                 tokio::time::sleep(wait).await;
             }
         }
@@ -460,7 +551,11 @@ async fn collect_tokens(
         let body = search_body(city, category, prev.as_ref().map(|(a, b)| (a, b)));
         let resp = search_page(client, &body, args.max_retries, args.backoff_ms).await?;
 
-        let widgets = resp.get("list_widgets").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let widgets = resp
+            .get("list_widgets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         let mut got_any = false;
         for w in &widgets {
@@ -503,7 +598,10 @@ async fn collect_tokens(
 
         prev = Some((
             resp.get("search_data").cloned().unwrap_or(Value::Null),
-            resp.get("pagination").and_then(|p| p.get("data")).cloned().unwrap_or(Value::Null),
+            resp.get("pagination")
+                .and_then(|p| p.get("data"))
+                .cloned()
+                .unwrap_or(Value::Null),
         ));
 
         tokio::time::sleep(Duration::from_millis(args.page_delay_ms)).await;
@@ -520,8 +618,15 @@ async fn collect_tokens(
 /// (accepted, though it is tyres and mirrors). So: an explicit set.
 fn accepted_slugs(category: &str) -> BTreeSet<String> {
     const VEHICLE_SUBTREE: &[&str] = &[
-        "auto", "light", "heavy", "classic", "motorcycles", "auto-parts",
-        "car-rental", "vehicles", "cars",
+        "auto",
+        "light",
+        "heavy",
+        "classic",
+        "motorcycles",
+        "auto-parts",
+        "car-rental",
+        "vehicles",
+        "cars",
     ];
     let mut set = BTreeSet::new();
     set.insert(category.to_string());
@@ -624,6 +729,8 @@ const NOT_VEHICLE_KEYS: &[&str] = &[
     "تعداد اتاق",
 ];
 
+/// True when a flattened listing carries at least one strong vehicle spec and no
+/// spec that only non-vehicle categories use.
 fn looks_like_a_vehicle(row: &Row) -> bool {
     let has = |keys: &[&str]| keys.iter().any(|k| row.dynamic.contains_key(*k));
     has(VEHICLE_SPEC_KEYS) || (has(WEAK_VEHICLE_KEYS) && !has(NOT_VEHICLE_KEYS))
@@ -685,6 +792,7 @@ fn audit_fetched_payloads(
 
 // ------------------------------------------------------------------ detail
 
+/// Why a detail fetch failed: worth retrying later, or permanently gone.
 enum FetchErr {
     /// Post is gone (404/410) — retrying will never help.
     Dead(String),
@@ -789,11 +897,13 @@ const FIXED_COLUMNS: &[&str] = &[
     "fetched_at",
 ];
 
+/// One flattened listing: the fixed columns plus every harvested dynamic field.
 struct Row {
     fixed: BTreeMap<String, String>,
     dynamic: BTreeMap<String, String>,
 }
 
+/// Render an optional JSON value as a CSV cell: strings unquoted, null/missing empty.
 fn s(v: Option<&Value>) -> String {
     match v {
         Some(Value::String(x)) => x.clone(),
@@ -850,9 +960,14 @@ fn flatten_scalars(v: &Value, prefix: &str, out: &mut BTreeMap<String, String>) 
     }
 }
 
+/// Turn one detail payload into a [`Row`]: fixed columns from known paths, dynamic
+/// columns from [`harvest_pairs`] and [`flatten_scalars`].
 fn flatten(token: &str, detail: &Value, fetched_at: u64) -> Row {
     let empty: Vec<Value> = Vec::new();
-    let sections = detail.get("sections").and_then(|v| v.as_array()).unwrap_or(&empty);
+    let sections = detail
+        .get("sections")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&empty);
 
     let mut fixed: BTreeMap<String, String> = BTreeMap::new();
     let mut dynamic: BTreeMap<String, String> = BTreeMap::new();
@@ -861,7 +976,10 @@ fn flatten(token: &str, detail: &Value, fetched_at: u64) -> Row {
     fixed.insert("url".into(), format!("https://divar.ir/v/-/{token}"));
     fixed.insert("fetched_at".into(), fetched_at.to_string());
     fixed.insert("seo_title".into(), s(detail.pointer("/seo/title")));
-    fixed.insert("seo_description".into(), s(detail.pointer("/seo/description")));
+    fixed.insert(
+        "seo_description".into(),
+        s(detail.pointer("/seo/description")),
+    );
     fixed.insert("city".into(), s(detail.pointer("/city/name")));
     fixed.insert("district".into(), s(detail.pointer("/district/name")));
     let category = [
@@ -881,7 +999,11 @@ fn flatten(token: &str, detail: &Value, fetched_at: u64) -> Row {
 
     for sec in sections {
         let name = s(sec.get("section_name"));
-        let widgets = sec.get("widgets").and_then(|w| w.as_array()).cloned().unwrap_or_default();
+        let widgets = sec
+            .get("widgets")
+            .and_then(|w| w.as_array())
+            .cloned()
+            .unwrap_or_default();
 
         for w in &widgets {
             let wt = s(w.get("widget_type"));
@@ -932,7 +1054,9 @@ fn flatten(token: &str, detail: &Value, fetched_at: u64) -> Row {
 
             if name == "MAP" {
                 if let Some(loc) = d.get("location") {
-                    let pt = loc.pointer("/fuzzy_data/point").or_else(|| loc.pointer("/exact_data/point"));
+                    let pt = loc
+                        .pointer("/fuzzy_data/point")
+                        .or_else(|| loc.pointer("/exact_data/point"));
                     if let Some(pt) = pt {
                         fixed.insert("latitude".into(), s(pt.get("latitude")));
                         fixed.insert("longitude".into(), s(pt.get("longitude")));
@@ -1074,6 +1198,7 @@ fn collect_city_ids(v: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Append one JSON value as a line to `path`, creating the file if needed.
 fn append_jsonl(path: &str, value: &Value) -> Result<()> {
     let mut f = OpenOptions::new()
         .create(true)
@@ -1084,6 +1209,7 @@ fn append_jsonl(path: &str, value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Read every line of a JSONL file; a missing file is an empty list.
 fn read_jsonl(path: &str) -> Result<Vec<Value>> {
     if !std::path::Path::new(path).exists() {
         return Ok(Vec::new());
@@ -1138,7 +1264,10 @@ fn export_csv(out_dir: &str, batch_size: usize) -> Result<()> {
 
     for old in fs::read_dir(out_dir)? {
         let p = old?.path();
-        if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("batch_") && n.ends_with(".csv")) {
+        if p.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("batch_") && n.ends_with(".csv"))
+        {
             fs::remove_file(p)?;
         }
     }
@@ -1161,7 +1290,11 @@ fn export_csv(out_dir: &str, batch_size: usize) -> Result<()> {
         eprintln!("wrote {path} ({} rows)", chunk.len());
     }
 
-    eprintln!("exported {} rows, {} columns (identical header in every batch)", rows.len(), header.len());
+    eprintln!(
+        "exported {} rows, {} columns (identical header in every batch)",
+        rows.len(),
+        header.len()
+    );
     Ok(())
 }
 
@@ -1197,11 +1330,14 @@ async fn fetch_all(
     while let Some((token, res)) = results.next().await {
         match res {
             Ok(detail) => {
-                append_jsonl(&raw_path, &json!({
-                    "token": token,
-                    "fetched_at": now_secs(),
-                    "detail": detail,
-                }))?;
+                append_jsonl(
+                    &raw_path,
+                    &json!({
+                        "token": token,
+                        "fetched_at": now_secs(),
+                        "detail": detail,
+                    }),
+                )?;
                 done += 1;
             }
             Err(msg) => {
@@ -1211,7 +1347,7 @@ async fn fetch_all(
             }
         }
 
-        if (done + failed) % 25 == 0 || done + failed == total {
+        if (done + failed).is_multiple_of(25) || done + failed == total {
             eprintln!(
                 "progress: {done} ok, {failed} failed, {total} total (throttle {}ms)",
                 throttle.current()
@@ -1231,8 +1367,11 @@ async fn fetch_all(
         writeln!(f, "{}", serde_json::to_string(v)?)?;
     }
     if queue.len() > failed {
-        eprintln!("failures.jsonl now holds {} outstanding listings ({} from earlier runs)",
-            queue.len(), queue.len() - failed);
+        eprintln!(
+            "failures.jsonl now holds {} outstanding listings ({} from earlier runs)",
+            queue.len(),
+            queue.len() - failed
+        );
     }
 
     Ok((done, failed))
@@ -1268,7 +1407,11 @@ fn observe_panel(raw_tokens: Vec<String>, removed: &HashSet<String>, max: usize)
     let panel = raw_tokens
         .into_iter()
         .filter(|t| seen.insert(t.clone()) && !removed.contains(t));
-    if max == 0 { panel.collect() } else { panel.take(max).collect() }
+    if max == 0 {
+        panel.collect()
+    } else {
+        panel.take(max).collect()
+    }
 }
 
 /// Tokens of a JSONL file in file order, keeping only lines where `keep` holds.
@@ -1291,7 +1434,9 @@ fn tokens_where(path: &str, keep: impl Fn(&Value) -> bool) -> Result<Vec<String>
             // A crawl appending to this file right now leaves a half-written
             // LAST line. Anywhere else, a bad line is corruption.
             Err(_) if lines.peek().is_none() => {
-                eprintln!("note: ignoring incomplete final line of {path} (file is being written?)");
+                eprintln!(
+                    "note: ignoring incomplete final line of {path} (file is being written?)"
+                );
                 break;
             }
             Err(e) => return Err(e).with_context(|| format!("bad JSON line in {path}")),
@@ -1312,12 +1457,22 @@ async fn observe_all(client: &Client, args: &Args, throttle: Arc<Throttle>) -> R
     let raw_path = format!("{}/{RAW_FILE}", args.out_dir);
     let obs_path = format!("{}/{OBS_FILE}", args.out_dir);
 
-    let removed: HashSet<String> = tokens_where(&obs_path, |v| v["status"] == "removed")?.into_iter().collect();
-    let panel = observe_panel(tokens_where(&raw_path, |_| true)?, &removed, args.observe_max);
+    let removed: HashSet<String> = tokens_where(&obs_path, |v| v["status"] == "removed")?
+        .into_iter()
+        .collect();
+    let panel = observe_panel(
+        tokens_where(&raw_path, |_| true)?,
+        &removed,
+        args.observe_max,
+    );
     if panel.is_empty() {
         bail!("nothing to observe: no live listings in {raw_path}");
     }
-    eprintln!("observing {} listings ({} already confirmed removed)", panel.len(), removed.len());
+    eprintln!(
+        "observing {} listings ({} already confirmed removed)",
+        panel.len(),
+        removed.len()
+    );
 
     let total = panel.len();
     let (mut live, mut gone, mut unreachable) = (0usize, 0usize, 0usize);
@@ -1336,7 +1491,11 @@ async fn observe_all(client: &Client, args: &Args, throttle: Arc<Throttle>) -> R
     while let Some((token, res)) = results.next().await {
         match observation(&token, &res, now_secs()) {
             Some(obs) => {
-                if obs["status"] == "live" { live += 1 } else { gone += 1 }
+                if obs["status"] == "live" {
+                    live += 1
+                } else {
+                    gone += 1
+                }
                 append_jsonl(&obs_path, &obs)?;
             }
             None => unreachable += 1,
@@ -1402,7 +1561,11 @@ async fn main() -> Result<()> {
     let accept: BTreeSet<String> = if args.accept_categories.trim().is_empty() {
         categories.iter().flat_map(|c| accepted_slugs(c)).collect()
     } else {
-        args.accept_categories.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+        args.accept_categories
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
     };
 
     let throttle = Arc::new(Throttle::new(args.detail_delay_ms, args.max_delay_ms));
@@ -1449,7 +1612,8 @@ async fn main() -> Result<()> {
             "\n--- read the breakdown above yourself; a zero exit code is NOT a verdict. ---\n\
              Expect vehicle slugs only. If you see real-estate/phones/jobs, the filter is\n\
              not applied and '{}' is the wrong value for {}.",
-            args.category, city.describe()
+            args.category,
+            city.describe()
         );
         return Ok(());
     }
@@ -1457,7 +1621,9 @@ async fn main() -> Result<()> {
     // ---- full scrape ----
     eprintln!(
         "fetching up to {} listings, category '{}', {}",
-        args.count, args.category, city.describe()
+        args.count,
+        args.category,
+        city.describe()
     );
 
     // Split the budget across categories, then hand any shortfall to the rest --
@@ -1470,7 +1636,11 @@ async fn main() -> Result<()> {
             break;
         }
         let share = remaining / (categories.len() - i).max(1);
-        let want = if i + 1 == categories.len() { remaining } else { share.max(1) };
+        let want = if i + 1 == categories.len() {
+            remaining
+        } else {
+            share.max(1)
+        };
         eprintln!("collecting '{cat}' (up to {want})...");
         let got = collect_tokens(&client, &city, cat, want, &args).await?;
         for (tok, slug) in got {
@@ -1480,7 +1650,12 @@ async fn main() -> Result<()> {
         }
     }
     eprintln!("token collection done: {} unique tokens", collected.len());
-    audit_categories(&collected, &args.category, &accept, args.min_category_purity)?;
+    audit_categories(
+        &collected,
+        &args.category,
+        &accept,
+        args.min_category_purity,
+    )?;
 
     // Resume: never re-fetch what raw.jsonl already has.
     let have = tokens_in(&raw_path)?;
@@ -1490,7 +1665,11 @@ async fn main() -> Result<()> {
         .filter(|t| !have.contains(t))
         .collect();
     if !have.is_empty() {
-        eprintln!("resuming: {} already in {raw_path}, {} to fetch", have.len(), todo.len());
+        eprintln!(
+            "resuming: {} already in {raw_path}, {} to fetch",
+            have.len(),
+            todo.len()
+        );
     }
 
     // Pilot first: verify the filter against real payloads before committing to
@@ -1503,7 +1682,10 @@ async fn main() -> Result<()> {
         eprintln!("pilot batch: fetching {pilot_n} listings to verify the filter");
         fetch_all(&client, pilot, &args, throttle.clone()).await?;
         audit_fetched_payloads(&args.out_dir, args.min_vehicle_purity, Some(&pilot_set))?;
-        eprintln!("pilot OK -- continuing with the remaining {} listings", todo.len());
+        eprintln!(
+            "pilot OK -- continuing with the remaining {} listings",
+            todo.len()
+        );
     }
 
     let (mut done, mut failed) = fetch_all(&client, todo, &args, throttle.clone()).await?;
@@ -1553,7 +1735,10 @@ mod tests {
             let c = city_candidates(word);
             assert!(c.len() > 1, "{word} should produce candidates to try");
             assert_eq!(c[0], CityMode::Omit);
-            assert!(!c.contains(&CityMode::Ids(vec!["iran".into()])), "the shape that 400s");
+            assert!(
+                !c.contains(&CityMode::Ids(vec!["iran".into()])),
+                "the shape that 400s"
+            );
         }
 
         let c = city_candidates("1,2");
@@ -1585,21 +1770,45 @@ mod tests {
         let mut ids = Vec::new();
         collect_city_ids(&payload, &mut ids);
         assert!(ids.contains(&"1".to_string()) && ids.contains(&"2".to_string()));
-        assert!(!ids.contains(&"7".to_string()), "an id with no name is not a city");
+        assert!(
+            !ids.contains(&"7".to_string()),
+            "an id with no name is not a city"
+        );
     }
 
     #[test]
     fn category_survives_pagination_echo() {
         let body = search_body(&CityMode::Ids(vec!["1".into()]), "auto", None);
-        assert_eq!(body.pointer("/search_data/form_data/data/category/str/value").unwrap(), "auto");
+        assert_eq!(
+            body.pointer("/search_data/form_data/data/category/str/value")
+                .unwrap(),
+            "auto"
+        );
 
         // Server echoes search_data back WITHOUT the category (what Divar did).
         let echoed = json!({ "form_data": { "data": { "sort": { "str": { "value": "new" } } } } });
         let page_data = json!({ "last_post_date": "123" });
-        let body2 = search_body(&CityMode::Ids(vec!["1".into()]), "auto", Some((&echoed, &page_data)));
-        assert_eq!(body2.pointer("/search_data/form_data/data/category/str/value").unwrap(), "auto");
-        assert_eq!(body2.pointer("/search_data/form_data/data/sort/str/value").unwrap(), "new");
-        assert_eq!(body2.pointer("/pagination_data/last_post_date").unwrap(), "123");
+        let body2 = search_body(
+            &CityMode::Ids(vec!["1".into()]),
+            "auto",
+            Some((&echoed, &page_data)),
+        );
+        assert_eq!(
+            body2
+                .pointer("/search_data/form_data/data/category/str/value")
+                .unwrap(),
+            "auto"
+        );
+        assert_eq!(
+            body2
+                .pointer("/search_data/form_data/data/sort/str/value")
+                .unwrap(),
+            "new"
+        );
+        assert_eq!(
+            body2.pointer("/pagination_data/last_post_date").unwrap(),
+            "123"
+        );
     }
 
     fn toks(pairs: &[(&str, usize)]) -> Vec<(String, String)> {
@@ -1627,9 +1836,17 @@ mod tests {
     fn audit_accepts_the_whole_vehicle_subtree_under_a_parent_slug() {
         let accept = accepted_slugs("auto");
         for child in ["light", "heavy", "classic", "motorcycles"] {
-            assert!(accept.contains(child), "{child} must be accepted under 'auto'");
+            assert!(
+                accept.contains(child),
+                "{child} must be accepted under 'auto'"
+            );
         }
-        let real_feed = toks(&[("light", 60), ("heavy", 15), ("motorcycles", 20), ("classic", 5)]);
+        let real_feed = toks(&[
+            ("light", 60),
+            ("heavy", 15),
+            ("motorcycles", 20),
+            ("classic", 5),
+        ]);
         assert!(
             audit_categories(&real_feed, "auto", &accept, 0.9).is_ok(),
             "a genuine whole-vehicle feed must not be rejected"
@@ -1656,7 +1873,11 @@ mod tests {
         // Normal run, nothing recovered: all 705 must still be queued.
         let have = HashSet::new();
         let q = merge_failures(&old_fails, new_fails.clone(), &have, false);
-        assert_eq!(q.len(), 705, "a normal run must not truncate earlier failures");
+        assert_eq!(
+            q.len(),
+            705,
+            "a normal run must not truncate earlier failures"
+        );
 
         // Tokens now present in raw.jsonl have been recovered and drop out.
         let have: HashSet<String> = (0..700).map(|i| format!("old{i}")).collect();
@@ -1724,11 +1945,19 @@ mod tests {
     /// The vocabulary-independent guard: does the payload look like a vehicle?
     #[test]
     fn vehicle_detection_ignores_slug_vocabulary() {
-        let car = flatten("a", &listing(&[("کارکرد", "۱۲۰۰۰۰"), ("گیربکس", "دنده‌ای")]), 0);
+        let car = flatten(
+            "a",
+            &listing(&[("کارکرد", "۱۲۰۰۰۰"), ("گیربکس", "دنده‌ای")]),
+            0,
+        );
         assert!(looks_like_a_vehicle(&car));
 
         // A motorcycle: different specs, still a vehicle. "All kinds" must pass.
-        let bike = flatten("b", &listing(&[("حجم موتور", "۱۲۵"), ("برند و مدل", "هوندا")]), 0);
+        let bike = flatten(
+            "b",
+            &listing(&[("حجم موتور", "۱۲۵"), ("برند و مدل", "هوندا")]),
+            0,
+        );
         assert!(looks_like_a_vehicle(&bike));
 
         // The pollution from the first run.
@@ -1743,8 +1972,15 @@ mod tests {
     /// must not. Both shapes are real rows from the first run.
     #[test]
     fn weak_brand_key_does_not_let_phones_through() {
-        let rental = flatten("a", &listing(&[("برند و مدل", "پژو 207i پانوراما اتوماتیک")]), 0);
-        assert!(looks_like_a_vehicle(&rental), "rental cars have no کارکرد but are vehicles");
+        let rental = flatten(
+            "a",
+            &listing(&[("برند و مدل", "پژو 207i پانوراما اتوماتیک")]),
+            0,
+        );
+        assert!(
+            looks_like_a_vehicle(&rental),
+            "rental cars have no کارکرد but are vehicles"
+        );
 
         let phone = flatten(
             "b",
@@ -1755,33 +1991,55 @@ mod tests {
             ]),
             0,
         );
-        assert!(!looks_like_a_vehicle(&phone), "a handset must not count as a vehicle");
+        assert!(
+            !looks_like_a_vehicle(&phone),
+            "a handset must not count as a vehicle"
+        );
     }
 
     /// The history feature depends on three distinctions: live carries a price,
     /// a 404/410 is a removal, and "could not reach" records nothing at all.
     #[test]
     fn observation_separates_live_removed_and_unreachable() {
-        let live = observation("a", &Ok(json!({ "webengage": { "price": 550000000u64 } })), 7).unwrap();
+        let live = observation(
+            "a",
+            &Ok(json!({ "webengage": { "price": 550000000u64 } })),
+            7,
+        )
+        .unwrap();
         assert_eq!(live["status"], "live");
         assert_eq!(live["price"], 550000000u64);
         assert_eq!(live["observed_at"], 7);
 
         let negotiable = observation("a", &Ok(json!({})), 7).unwrap();
-        assert!(negotiable["price"].is_null(), "no fixed price is null, not 0");
+        assert!(
+            negotiable["price"].is_null(),
+            "no fixed price is null, not 0"
+        );
 
-        let dead = observation("a", &Err(format!("{DEAD_PREFIX} (http 404 Not Found)")), 7).unwrap();
+        let dead =
+            observation("a", &Err(format!("{DEAD_PREFIX} (http 404 Not Found)")), 7).unwrap();
         assert_eq!(dead["status"], "removed");
 
-        let flaky = observation("a", &Err("rate limited (429) (gave up after 9 attempts)".into()), 7);
-        assert!(flaky.is_none(), "a transient failure must not be read as a removal");
+        let flaky = observation(
+            "a",
+            &Err("rate limited (429) (gave up after 9 attempts)".into()),
+            7,
+        );
+        assert!(
+            flaky.is_none(),
+            "a transient failure must not be read as a removal"
+        );
     }
 
     /// Same panel every day: file order, no duplicates, removed ones dropped
     /// BEFORE the cap so the cap is not wasted on dead listings.
     #[test]
     fn observe_panel_is_stable_and_skips_removed() {
-        let raw: Vec<String> = ["a", "b", "a", "c", "d"].iter().map(|s| s.to_string()).collect();
+        let raw: Vec<String> = ["a", "b", "a", "c", "d"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let removed: HashSet<String> = ["b".to_string()].into_iter().collect();
         assert_eq!(observe_panel(raw.clone(), &removed, 0), vec!["a", "c", "d"]);
         assert_eq!(observe_panel(raw, &removed, 2), vec!["a", "c"]);
