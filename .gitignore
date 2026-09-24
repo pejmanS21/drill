@@ -1,3 +1,5 @@
 /target
 .DS_Store
 /divar_data_iran/
+/other_sources/
+__pycache__/

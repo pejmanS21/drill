@@ -130,3 +130,36 @@ so thousands of earlier good rows cannot mask a newly-broken filter.
 - A **normal run** merges: earlier failures are kept unless they now appear in `raw.jsonl`.
   It never truncates the queue — that is what lost the first run's ~700 records.
 - A **`--retry-failures` run** rewrites: recovered tokens leave, so the file can drain.
+
+## Other sources: bama, karnameh, hamrah-mechanic
+
+`scripts/crawl_sources.py` (stdlib only, run with uv) writes one CSV per site to
+`other_sources/`, using the Divar batch column names that torob-car's ingest reads.
+
+```sh
+uv run scripts/crawl_sources.py                        # all three, 300 listings each
+uv run scripts/crawl_sources.py --source bama --count 50
+```
+
+| Site | Where the data comes from |
+|---|---|
+| bama.ir | JSON search API `/cad/api/search?pageIndex=N` |
+| karnameh.com | `__NEXT_DATA__` on `/buy-used-cars?page=N` + detail API on `api-gw.karnameh.com` |
+| hamrah-mechanic.com | `__NEXT_DATA__` on `/cars-for-sale/?kmStatus=1&page=N` + each listing page |
+
+- Tokens are prefixed (`bama-…`, `karnameh-…`, `hamrah-…`) so they never collide with Divar's.
+- Every row is `webengage_cat_3=light`. Prices are in toman, like Divar's.
+- گیربکس / نوع سوخت / وضعیت بدنه only ever hold Divar's own wording, because torob-car aborts
+  the whole ingest on an unknown value. A site value with no confident Divar equivalent is
+  left blank, and the original goes to `gearbox_raw` / `fuel_raw` / `body_raw`. This is on
+  purpose for replaced parts (`… تعویض`, which Divar has no value for), for 3+ painted parts and
+  for plain «دوگانه» (factory or aftermarket unknown).
+- Karnameh and hamrah don't show listing age, so `posted_raw` reads `نامشخص در <city>، <district>`
+  and `posted_at` comes out null.
+
+Before ingesting, run the rows through torob-car's own `map_row`:
+
+```sh
+cd ../torob-car/backend
+PYTHONPATH=. uv run python ../../divar-scraper/scripts/check_ingest.py ../../divar-scraper/other_sources/*.csv
+```
